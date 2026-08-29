@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HEARTWOOD MINING BOT - v4.2 (LDPlayer 9 - Click-based Joystick & Action)
-Cotton detected → Calculate distance → Click joystick → Drag in direction → Stop at distance 0 → Click gather icon
-Using ADB tap + drag for joystick, and click coordinates for action buttons
+HEARTWOOD MINING BOT - v4.3 (LDPlayer 9 - ADB Drag & Tap - FIXED)
+Cotton detected → Calculate distance → Drag joystick → Stop at distance → Gather
+FIXES: Proper movement reset, better drag logging, configurable parameters
 """
 
 import os
@@ -21,28 +21,11 @@ import subprocess
 from datetime import datetime
 from tkinter import PhotoImage
 
-# Try different keyboard libraries
-try:
-    import pydirectinput as pdi
-    USE_PYDIRECTINPUT = True
-    print("✅ Using PyDirectInput for keyboard")
-except ImportError:
-    USE_PYDIRECTINPUT = False
-    print("⚠️  PyDirectInput not available, using pyautogui")
-
-try:
-    import keyboard
-    USE_KEYBOARD_LIB = True
-    print("✅ Using keyboard library")
-except ImportError:
-    USE_KEYBOARD_LIB = False
-
 # GLOBAL
-global Lilian, movement_active, stop_movement_flag, current_target, adb_device
+global Lilian, movement_active, current_target, adb_device
 full_counter = 0
 lifted_cotton = 0
 movement_active = False
-stop_movement_flag = False
 current_target = None
 adb_device = None
 
@@ -50,22 +33,22 @@ adb_device = None
 WINDOW_TITLE = 'LDPlayer'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ⭐ JOYSTICK POSITION (LDPLAYER GAME COORDINATES)
-JOYSTICK_CENTER_X = 130      # X dalam game area
-JOYSTICK_CENTER_Y = 550      # Y dalam game area
-JOYSTICK_PUSH_RADIUS = 70    # Push radius untuk joystick
+# ⭐ JOYSTICK POSITION (SESUAIKAN DENGAN GAME ANDA)
+JOYSTICK_CENTER_X = 130      # X center joystick game
+JOYSTICK_CENTER_Y = 550      # Y center joystick game
+JOYSTICK_PUSH_RADIUS = 70    # Max push distance
 
-# ⭐ ACTION/GATHER BUTTON POSITION
-# Tentukan koordinat icon gather di LDPlayer
-GATHER_BUTTON_X = 380        # UBAH SESUAI POSISI ICON GATHER DI GAME ANDA
-GATHER_BUTTON_Y = 540        # UBAH SESUAI POSISI ICON GATHER DI GAME ANDA
+# ⭐ GATHER BUTTON POSITION (SESUAIKAN DENGAN GAME ANDA)
+GATHER_BUTTON_X = 380        # X coordinate gather button
+GATHER_BUTTON_Y = 540        # Y coordinate gather button
 
-# ⭐ ADB DRAG PARAMETERS
-DRAG_DURATION_MS = 500       # Duration of drag in milliseconds
-TRACKING_UPDATE_INTERVAL = 0.02
-DISTANCE_THRESHOLD = 20      # Stop when distance <= 20px (lebih toleran)
-DIRECTION_RECALC_INTERVAL = 0.15  # Recalculate direction every 150ms
+# ⭐ ADB DRAG PARAMETERS - SESUAIKAN JIKA TIDAK BERGERAK
+DRAG_DURATION_MS = 800       # ← NAIKKAN INI JIKA TIDAK BERGERAK (800, 1000, 1200)
+DISTANCE_THRESHOLD = 30      # Stop ketika jarak <= 30px
+DIRECTION_RECALC_INTERVAL = 0.15  # Update direction setiap 150ms
 HARVEST_COMPLETE_MIN_TIME = 3
+MAX_DRAG_ATTEMPTS = 5        # Max drag attempts sebelum re-scan
+DRAG_PUSH_MULTIPLIER = 0.45  # ← NAIKKAN INI JIKA GERAK KURANG (0.45, 0.5, 0.6)
 
 harvest_block_until = None
 
@@ -95,12 +78,10 @@ def init_adb():
     """Initialize ADB connection to LDPlayer"""
     global adb_device
     try:
-        # Try to connect to LDPlayer default port
         result = subprocess.run(['adb', 'connect', 'localhost:5555'], 
                               capture_output=True, text=True, timeout=5)
         print(f"✅ ADB connect result: {result.stdout.strip()}")
         
-        # Verify connection
         result = subprocess.run(['adb', 'devices'], 
                               capture_output=True, text=True, timeout=5)
         
@@ -119,31 +100,23 @@ def init_adb():
         print(f"❌ ADB init failed: {e}")
         return False
 
-def adb_shell(command):
-    """Execute ADB shell command"""
-    global adb_device
-    if not adb_device:
-        return None
-    try:
-        result = subprocess.run(['adb', '-s', adb_device, 'shell', command],
-                              capture_output=True, text=True, timeout=5)
-        return result.stdout.strip()
-    except Exception as e:
-        print(f"⚠️  ADB command failed: {e}")
-        return None
-
-def adb_drag_joystick(direction_x, direction_y, duration_ms=500):
+def adb_drag_joystick(direction_x, direction_y, duration_ms=None):
     """
-    Drag joystick using ADB tap and drag
-    Joystick di LDPlayer memerlukan: tap di center, lalu drag ke arah target
+    Drag joystick menggunakan ADB
     
     Args:
-        direction_x, direction_y: Direction vector (will be normalized)
-        duration_ms: Duration of drag in milliseconds
+        direction_x, direction_y: Direction vector
+        duration_ms: Duration in milliseconds (default: DRAG_DURATION_MS)
+    
+    Returns:
+        True jika berhasil, False jika gagal
     """
     global adb_device
     if not adb_device:
         return False
+    
+    if duration_ms is None:
+        duration_ms = DRAG_DURATION_MS
     
     try:
         # Normalize direction
@@ -154,8 +127,8 @@ def adb_drag_joystick(direction_x, direction_y, duration_ms=500):
         norm_x = direction_x / mag
         norm_y = direction_y / mag
         
-        # Calculate push distance
-        push_dist = min(mag * 0.4, JOYSTICK_PUSH_RADIUS)
+        # Calculate push distance - LEBIH AGGRESSIVE
+        push_dist = min(mag * DRAG_PUSH_MULTIPLIER, JOYSTICK_PUSH_RADIUS)
         
         # Calculate target position
         target_x = int(JOYSTICK_CENTER_X + (norm_x * push_dist))
@@ -167,27 +140,24 @@ def adb_drag_joystick(direction_x, direction_y, duration_ms=500):
         else:
             direction_str = "↑" if norm_y < 0 else "↓"
         
-        print(f'🎮 {direction_str} ADB Drag: ({JOYSTICK_CENTER_X},{JOYSTICK_CENTER_Y}) → ({target_x},{target_y}) dur={duration_ms}ms')
+        print(f'🎮 {direction_str} Drag: ({JOYSTICK_CENTER_X},{JOYSTICK_CENTER_Y}) → ({target_x},{target_y}) dur={duration_ms}ms mag={mag:.0f}')
         
-        # Execute drag: input touchscreen swipe = drag
+        # Execute drag via ADB
         cmd = f"input touchscreen swipe {JOYSTICK_CENTER_X} {JOYSTICK_CENTER_Y} {target_x} {target_y} {duration_ms}"
+        result = subprocess.run(['adb', '-s', adb_device, 'shell', cmd],
+                              capture_output=True, text=True, timeout=10)
         
-        subprocess.run(['adb', '-s', adb_device, 'shell', cmd],
-                      capture_output=True, text=True, timeout=10)
-        
-        # Wait for drag to complete
-        time.sleep(duration_ms / 1000.0 + 0.1)
+        # Wait untuk drag complete
+        time.sleep(duration_ms / 1000.0 + 0.05)
         
         return True
         
     except Exception as e:
-        print(f"❌ Joystick drag failed: {e}")
+        print(f"❌ Drag failed: {e}")
         return False
 
 def adb_tap(x, y):
-    """
-    Tap at coordinates using ADB
-    """
+    """Tap at coordinates using ADB"""
     global adb_device
     if not adb_device:
         return False
@@ -204,7 +174,7 @@ def adb_tap(x, y):
 # ============ TEMPLATE MATCHING FUNCTIONS ============
 
 def find_harvest_prompt(screenshot):
-    """Find prompt and return (name, confidence)"""
+    """Find harvest prompt"""
     prompts = [
         ('gather', MINING_TEMPLATE, THRESHOLD_MINING_ACTION),
         ('chop', CHOP_TEMPLATE, THRESHOLD_MINING_ACTION),
@@ -268,7 +238,7 @@ def calculate_distance(p1, p2):
 # ============ BOT MAIN LOOP ============
 
 def create_bot(window_title):
-    """Main bot loop with ADB drag joystick and tap gather"""
+    """Main bot loop - v4.3 dengan drag joystick proper"""
     global Lilian, lifted_cotton, harvest_block_until, movement_active, current_target
     
     try:
@@ -285,12 +255,13 @@ def create_bot(window_title):
         char_y = game_h // 2
 
         print(f"✅ Window: {target_window.title}")
-        print(f"📏 Game resolution: {game_w}x{game_h}")
-        print(f"👤 Character center: ({char_x}, {char_y})")
-        print(f"🎮 Joystick center: ({JOYSTICK_CENTER_X}, {JOYSTICK_CENTER_Y})")
-        print(f"📍 Distance Threshold: {DISTANCE_THRESHOLD}px")
-        print(f"⏱️  Drag Duration: {DRAG_DURATION_MS}ms")
+        print(f"📏 Resolution: {game_w}x{game_h}")
+        print(f"👤 Character at: ({char_x}, {char_y})")
+        print(f"🎮 Joystick: ({JOYSTICK_CENTER_X}, {JOYSTICK_CENTER_Y})")
         print(f"🖱️  Gather button: ({GATHER_BUTTON_X}, {GATHER_BUTTON_Y})")
+        print(f"⏱️  Drag duration: {DRAG_DURATION_MS}ms")
+        print(f"📍 Distance threshold: {DISTANCE_THRESHOLD}px")
+        print(f"💪 Push multiplier: {DRAG_PUSH_MULTIPLIER}")
 
         while not target_window.isActive:
             print("⏳ Waiting for window to be active...")
@@ -303,6 +274,7 @@ def create_bot(window_title):
         harvesting = False
         harvest_start = 0.0
         last_direction_update = time.time()
+        drag_attempt_count = 0
 
         while True:
             iteration += 1
@@ -328,10 +300,12 @@ def create_bot(window_title):
                 prompt = find_harvest_prompt(ss)
                 
                 if prompt and prompt[0] == 'gather' and not harvesting and not movement_active:
-                    print(f"🌾 Gather found! Clicking gather button at ({GATHER_BUTTON_X}, {GATHER_BUTTON_Y})")
+                    print(f"🌾 Gather found! Confidence: {prompt[1]:.2f}")
+                    print(f"📍 Clicking gather button at ({GATHER_BUTTON_X}, {GATHER_BUTTON_Y})")
                     harvesting = True
                     harvest_start = now
                     harvest_block_until = now + HARVEST_COMPLETE_MIN_TIME
+                    drag_attempt_count = 0
                     
                     # Click gather button
                     tapped = adb_tap(GATHER_BUTTON_X, GATHER_BUTTON_Y)
@@ -356,6 +330,7 @@ def create_bot(window_title):
                         harvesting = False
                         locked_target = None
                         current_target = None
+                        drag_attempt_count = 0
 
                 # Scan for cotton if not harvesting and no target
                 if not harvesting and locked_target is None and not movement_active:
@@ -370,8 +345,6 @@ def create_bot(window_title):
                         paths = []
 
                     if len(paths) > 0:
-                        print(f"🔎 Scanning {len(paths)} templates")
-
                         nearest = None
                         for path in paths:
                             try:
@@ -396,15 +369,17 @@ def create_bot(window_title):
                                 'last_distance': dist,
                             }
                             current_target = center
-                            print(f"🔒 Target locked! Dist={dist:.0f}px, Conf={conf:.2f}")
+                            drag_attempt_count = 0
+                            print(f"🔒 Target LOCKED! Dist={dist:.0f}px, Conf={conf:.2f}")
 
                 # === ADB DRAG JOYSTICK PURSUIT ===
                 if not harvesting and locked_target and not movement_active:
                     match = find_locked_target(ss, locked_target)
                     if match is None:
-                        print("⌛ Target lost, scanning again...")
+                        print("⌛ Target LOST, re-scanning...")
                         locked_target = None
                         current_target = None
+                        drag_attempt_count = 0
                     else:
                         tpl, conf, tl, target_center = match
                         locked_target['last_center'] = target_center
@@ -412,21 +387,35 @@ def create_bot(window_title):
                         dist = calculate_distance((char_x, char_y), target_center)
 
                         if dist <= DISTANCE_THRESHOLD:
-                            print(f"✅ REACHED TARGET! Dist={dist:.0f}px - Waiting for gather prompt...")
+                            print(f"✅ REACHED TARGET! Dist={dist:.0f}px")
+                            print(f"🟢 Waiting for gather prompt...")
                             locked_target = None
                             current_target = None
+                            drag_attempt_count = 0
                         elif now - last_direction_update >= DIRECTION_RECALC_INTERVAL:
                             # Calculate direction to target
                             last_direction_update = now
                             dx = target_center[0] - char_x
                             dy = target_center[1] - char_y
                             
-                            # Execute drag
+                            # Execute drag - DENGAN PROPER RESET
                             movement_active = True
-                            adb_drag_joystick(dx, dy, DRAG_DURATION_MS)
-                            movement_active = False
+                            try:
+                                success = adb_drag_joystick(dx, dy, DRAG_DURATION_MS)
+                                if success:
+                                    drag_attempt_count += 1
+                                    print(f"  📍 Dist: {dist:.0f}px | Dir: ({dx:.0f}, {dy:.0f}) | Attempt: {drag_attempt_count}")
+                                else:
+                                    print(f"  ⚠️ Drag failed")
+                            finally:
+                                movement_active = False
                             
-                            print(f"  📍 Distance: {dist:.0f}px | Dir: ({dx:.0f}, {dy:.0f})")
+                            # Reset jika attempt terlalu banyak
+                            if drag_attempt_count >= MAX_DRAG_ATTEMPTS:
+                                print(f"⚠️ Max drag attempts reached, re-scanning...")
+                                locked_target = None
+                                current_target = None
+                                drag_attempt_count = 0
 
                 try:
                     display_image(ss)
@@ -437,8 +426,9 @@ def create_bot(window_title):
                 print(f"❌ Error: {e}")
                 import traceback
                 traceback.print_exc()
+                movement_active = False
 
-            time.sleep(0.05)  # Main loop: 50ms
+            time.sleep(0.05)
 
     except Exception as e:
         print(f"❌ Fatal: {e}")
@@ -492,6 +482,7 @@ def test_input():
     print(f"✅ Joystick: ({JOYSTICK_CENTER_X}, {JOYSTICK_CENTER_Y})")
     print(f"✅ Gather button: ({GATHER_BUTTON_X}, {GATHER_BUTTON_Y})")
     print(f"✅ Drag Duration: {DRAG_DURATION_MS}ms")
+    print(f"✅ Push Multiplier: {DRAG_PUSH_MULTIPLIER}")
     print(f"⏳ Wait 3 seconds before testing...\n")
     time.sleep(3)
     
@@ -510,7 +501,7 @@ def test_input():
     for dx, dy, name in directions:
         print(f"   {name}")
         adb_drag_joystick(dx, dy, DRAG_DURATION_MS)
-        time.sleep(0.2)
+        time.sleep(0.3)
     
     print("\n➡️  Testing GATHER TAP...")
     time.sleep(1)
@@ -523,14 +514,11 @@ def start_function():
     """Start bot"""
     global Lilian
     if not adb_device:
-        print("❌ ADB not connected! Cannot start bot.")
-        print("   Make sure LDPlayer is running and ADB port 5555 is open.")
+        print("❌ ADB not connected!")
         return
     
-    print("▶️  STARTING BOT v4.2 (ADB DRAG & TAP)")
-    print("🎮 Using ADB drag for joystick movement")
-    print("🖱️  Using ADB tap for gather action")
-    print("💡 Make sure LDPlayer window is active")
+    print("▶️  STARTING BOT v4.3 (FIXED)")
+    print("🎮 Using ADB drag + tap")
     Lilian = True
     threading.Thread(target=create_bot, args=(WINDOW_TITLE,), daemon=True).start()
     start_button["state"] = "disabled"
@@ -549,105 +537,71 @@ def stop_function():
 if __name__ == "__main__":
     Lilian = False
     
-    # Initialize ADB
     print("\n" + "="*60)
-    print("🎮 HEARTWOOD BOT v4.2 - ADB DRAG & TAP")
+    print("🎮 HEARTWOOD BOT v4.3")
     print("="*60)
-    print("\n🔌 Initializing ADB connection...\n")
+    print("\n🔌 Initializing ADB...\n")
     
     if not init_adb():
         print("\n⚠️  ADB initialization failed!")
-        print("\nSetup instructions:")
-        print("1. Download Android SDK Platform Tools:")
-        print("   https://developer.android.com/studio/command-line/adb")
-        print("")
-        print("2. Add to PATH or run from same directory")
-        print("")
-        print("3. Open LDPlayer and enable ADB:")
-        print("   Settings → Advanced → Enable ADB")
-        print("")
-        print("4. Make sure LDPlayer is running before starting bot")
-        print("\n" + "="*60 + "\n")
     
     root = tk.Tk()
-    root.title("🎮 Heartwood Bot v4.2 (ADB Drag & Tap)")
+    root.title("🎮 Heartwood Bot v4.3")
     root.geometry("305x700+0+0")
     root.attributes("-topmost", True)
     root.wm_attributes('-toolwindow', 1)
     root.configure(bg='#2b2b2b')
 
-    # Console output
     console = tk.Text(root, wrap=tk.WORD, height=14, width=35,
                       bg='#1e1e1e', fg='#00ff00', font=('Courier', 8))
     console.grid(row=1, column=0, columnspan=2, padx=10, pady=5)
     sys.stdout = RedirectText(console)
 
-    # Start button
     start_button = tk.Button(root, text="▶️  START", command=start_function,
                              fg="white", bg="#00aa00", font=('Arial', 10, 'bold'))
     start_button.grid(row=0, column=0, padx=5, pady=5, sticky='ew')
 
-    # Stop button
     stop_button = tk.Button(root, text="⏹️  STOP", command=stop_function,
                             fg="white", bg="#aa0000", font=('Arial', 10, 'bold'))
     stop_button.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
 
-    # Test button
     test_button = tk.Button(root, text="🧪 TEST INPUT", command=test_input,
                             fg="white", bg="#0099cc", font=('Arial', 8))
     test_button.grid(row=2, column=0, columnspan=2, padx=2, pady=2, sticky='ew')
 
-    # Image display
     image_label = tk.Label(root, bg='#1e1e1e', height=8)
     image_label.grid(row=3, column=0, columnspan=2, padx=0, pady=5, sticky='ew')
 
-    # Cotton counter
     label_lifted_cotton = tk.Label(root, text="🌾 Cotton: 0", fg="#00ff00", bg='#2b2b2b',
                                    font=('Arial', 12, 'bold'))
     label_lifted_cotton.grid(row=0, column=0, columnspan=2, padx=0, pady=5)
 
-    # Info
     print('╔════════════════════════════════════╗')
-    print('║  🎮 HEARTWOOD BOT v4.2            ║')
-    print('║  ADB Drag & Tap Mode               ║')
-    print('║  Click-based Joystick & Action     ║')
+    print('║  🎮 HEARTWOOD BOT v4.3            ║')
+    print('║  ADB Drag & Tap - FIXED            ║')
+    print('║  Improved Movement & Logging       ║')
     print('╚════════════════════════════════════╝')
     print('')
-    print('🎮 ADB Drag & Tap Features:')
-    print('  • ADB tap + drag for joystick')
-    print('  • ADB tap for gather action')
-    print('  • No keyboard input needed')
-    print('  • Direct touch event injection')
-    print('  • Works with LDPlayer joystick')
+    print('🆕 v4.3 Improvements:')
+    print('  ✅ Proper movement_active reset')
+    print('  ✅ Better drag attempt tracking')
+    print('  ✅ Detailed console logging')
+    print('  ✅ Configurable push multiplier')
+    print('  ✅ Max drag attempts safeguard')
     print('')
-    print('⚠️  IMPORTANT CONFIGURATION:')
-    print('  You MUST set the correct coordinates:')
-    print(f'  • GATHER_BUTTON_X = {GATHER_BUTTON_X}')
-    print(f'  • GATHER_BUTTON_Y = {GATHER_BUTTON_Y}')
+    print('⚙️  Tuning Parameters (edit script):')
+    print(f'  • DRAG_DURATION_MS = {DRAG_DURATION_MS}')
+    print(f'    → Naikkan ke 1000 atau 1200 jika masih tidak bergerak')
+    print(f'  • DRAG_PUSH_MULTIPLIER = {DRAG_PUSH_MULTIPLIER}')
+    print(f'    → Naikkan ke 0.5 atau 0.6 untuk gerak lebih besar')
+    print(f'  • DISTANCE_THRESHOLD = {DISTANCE_THRESHOLD}')
+    print(f'    → Turunkan ke 20 jika terlalu dekat sebelum gather')
     print('')
-    print('  To find coordinates:')
-    print('  1. Take a screenshot of your game')
-    print('  2. Find the icon/button to gather')
-    print('  3. Note the X, Y coordinates')
-    print('  4. Update the values in script')
-    print('')
-    print('Configuration:')
-    print(f'  • Joystick Center: ({JOYSTICK_CENTER_X}, {JOYSTICK_CENTER_Y})')
-    print(f'  • Drag Duration: {DRAG_DURATION_MS}ms')
-    print(f'  • Distance Threshold: {DISTANCE_THRESHOLD}px')
-    print(f'  • Direction Update: {DIRECTION_RECALC_INTERVAL*1000:.0f}ms')
-    print(f'  • Push Radius: {JOYSTICK_PUSH_RADIUS}px')
-    print('')
-    print('ADB Commands Used:')
-    print('  • Drag: input touchscreen swipe X1 Y1 X2 Y2 DURATION')
-    print('  • Tap: input touchscreen tap X Y')
-    print('')
-    print('Instructions:')
-    print('  1. Find the gather button coordinates in your game')
-    print('  2. Update GATHER_BUTTON_X and GATHER_BUTTON_Y')
-    print('  3. Make sure LDPlayer is running')
-    print('  4. Click "🧪 TEST INPUT" to verify ADB')
-    print('  5. Click "▶️  START" to begin farming')
+    print('Quick Fix Checklist:')
+    print('  1. Run debug script: python botjelabot_debug.py')
+    print('  2. Note which drag duration works')
+    print('  3. Update DRAG_DURATION_MS to that value')
+    print('  4. Run bot again')
     print('')
 
     stop_button["state"] = "disabled"
