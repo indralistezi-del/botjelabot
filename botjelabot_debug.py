@@ -96,7 +96,8 @@ def test_coordinate_discovery():
     
     for x, y, desc in test_coords:
         print(f"\n   Tap at {desc}")
-        adb_shell(f"input touchscreen tap {x} {y}")\n        time.sleep(0.5)
+        adb_shell(f"input touchscreen tap {x} {y}")
+        time.sleep(0.5)
 
 def test_emulator_info():
     """Get emulator screen size"""
