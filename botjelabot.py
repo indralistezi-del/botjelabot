@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HEARTWOOD MINING BOT - v4.5 (AUTO ADB PATH DETECTION + FORCE DRAG FIX)
-CRITICAL FIXES:
-1. Auto detect ADB path (Windows, Linux, Mac)
-2. Force drag to target BEFORE gather
-3. Proper state machine transitions
+HEARTWOOD MINING BOT - v4.6 (AUTO DEVICE DETECTION)
+CRITICAL FIX: Auto detect correct ADB device (emulator-5554, localhost:5555, etc)
 """
 
 import os
@@ -21,10 +18,9 @@ import subprocess
 import shutil
 from datetime import datetime
 from tkinter import PhotoImage
-from queue import Queue
 
 # GLOBAL
-global Lilian, movement_active, current_target, adb_device, latest_screenshot
+global Lilian, movement_active, current_target, adb_device, adb_path, latest_screenshot
 full_counter = 0
 lifted_cotton = 0
 movement_active = False
@@ -38,21 +34,21 @@ screenshot_lock = threading.Lock()
 WINDOW_TITLE = 'LDPlayer'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ⭐ JOYSTICK POSITION (SESUAIKAN DENGAN GAME ANDA)
-JOYSTICK_CENTER_X = 130      # X center joystick
-JOYSTICK_CENTER_Y = 550      # Y center joystick
-JOYSTICK_PUSH_RADIUS = 70    # Max push distance
+# ⭐ JOYSTICK POSITION
+JOYSTICK_CENTER_X = 130
+JOYSTICK_CENTER_Y = 550
+JOYSTICK_PUSH_RADIUS = 70
 
 # ⭐ GATHER BUTTON POSITION
-GATHER_BUTTON_X = 380        # X coordinate gather button
-GATHER_BUTTON_Y = 540        # Y coordinate gather button
+GATHER_BUTTON_X = 380
+GATHER_BUTTON_Y = 540
 
 # ⭐ DRAG PARAMETERS
-DRAG_DURATION_MS = 2000      # Long hold drag (2 seconds)
-DISTANCE_THRESHOLD = 40      # Stop ketika jarak <= 40px
-DIRECTION_RECALC_INTERVAL = 0.5  # Update direction setiap 500ms
+DRAG_DURATION_MS = 2000
+DISTANCE_THRESHOLD = 40
+DIRECTION_RECALC_INTERVAL = 0.5
 HARVEST_COMPLETE_MIN_TIME = 3
-DRAG_PUSH_MULTIPLIER = 0.5   # Aggressive push distance
+DRAG_PUSH_MULTIPLIER = 0.5
 
 harvest_block_until = None
 
@@ -79,7 +75,7 @@ DIRECTION_AXIS_DEADZONE = 1
 # ============ ADB PATH DETECTION ============
 
 def find_adb_path():
-    """Auto detect ADB path di sistem"""
+    """Auto detect ADB path"""
     global adb_path
     
     print("🔍 Searching for ADB path...")
@@ -91,7 +87,7 @@ def find_adb_path():
         r"C:\Users\%username%\AppData\Local\Android\Sdk\platform-tools\adb.exe",
     ]
     
-    # Expand %username% if needed
+    # Expand %username%
     windows_paths_expanded = []
     for path in windows_paths:
         if '%username%' in path:
@@ -106,7 +102,7 @@ def find_adb_path():
             print(f"✅ Found ADB at: {adb_path}")
             return True
     
-    # Try system PATH (Linux/Mac or already in PATH)
+    # Try system PATH
     try:
         result = subprocess.run(['adb', 'version'], 
                               capture_output=True, text=True, timeout=5)
@@ -124,40 +120,84 @@ def find_adb_path():
         print(f"✅ Found ADB via shutil: {adb_path}")
         return True
     
-    print("❌ ADB not found! Please install Android SDK Platform Tools")
-    print("   Windows: Download from https://developer.android.com/studio/command-line/adb")
-    print("   Extract to C:\\Program Files\\Android\\platform-tools\\")
+    print("❌ ADB not found!")
     return False
+
+# ============ AUTO DEVICE DETECTION ============
+
+def auto_detect_device():
+    """Auto detect available ADB device"""
+    global adb_device, adb_path
+    
+    if not adb_path:
+        return False
+    
+    print("🔍 Auto-detecting ADB device...")
+    
+    try:
+        result = subprocess.run([adb_path, 'devices'], 
+                              capture_output=True, text=True, timeout=5)
+        
+        devices = []
+        for line in result.stdout.split('\n'):
+            line = line.strip()
+            if 'device' in line and 'List' not in line and 'attached' not in line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    device_id = parts[0]
+                    device_status = parts[1]
+                    if device_status == 'device':
+                        devices.append(device_id)
+                        print(f"  Found: {device_id} ({device_status})")
+        
+        if not devices:
+            print("❌ No devices found")
+            return False
+        
+        # Priority: emulator-5554 > localhost:5555 > first available
+        if 'emulator-5554' in devices:
+            adb_device = 'emulator-5554'
+            print(f"✅ Selected: emulator-5554 (LDPlayer)")
+            return True
+        elif 'localhost:5555' in devices:
+            adb_device = 'localhost:5555'
+            print(f"✅ Selected: localhost:5555")
+            return True
+        else:
+            adb_device = devices[0]
+            print(f"✅ Selected: {adb_device}")
+            return True
+            
+    except Exception as e:
+        print(f"❌ Device detection failed: {e}")
+        return False
 
 # ============ ADB FUNCTIONS ============
 
 def init_adb():
-    """Initialize ADB connection to LDPlayer"""
+    """Initialize ADB"""
     global adb_device, adb_path
     
-    # Find ADB first
     if not find_adb_path():
         return False
     
+    # Try to connect to localhost:5555 (LDPlayer default)
     try:
+        print("📱 Attempting to connect to localhost:5555 (LDPlayer)...")
         result = subprocess.run([adb_path, 'connect', 'localhost:5555'], 
                               capture_output=True, text=True, timeout=5)
-        print(f"✅ ADB connect result: {result.stdout.strip()}")
-        
-        result = subprocess.run([adb_path, 'devices'], 
-                              capture_output=True, text=True, timeout=5)
-        
-        if 'localhost:5555' in result.stdout or '127.0.0.1:5555' in result.stdout:
-            adb_device = 'localhost:5555'
-            print(f"✅ Connected to ADB device: {adb_device}")
-            return True
-        else:
-            print("⚠️  No ADB devices found. Make sure LDPlayer has ADB enabled.")
-            return False
-            
+        print(f"   Result: {result.stdout.strip()}")
+        time.sleep(1)
     except Exception as e:
-        print(f"❌ ADB init failed: {e}")
+        print(f"   Connect attempt: {e}")
+    
+    # Auto detect device
+    if not auto_detect_device():
         return False
+    
+    print(f"✅ ADB initialized successfully")
+    print(f"   Device: {adb_device}")
+    return True
 
 def execute_adb_command(cmd):
     """Execute ADB command"""
@@ -166,17 +206,17 @@ def execute_adb_command(cmd):
         return False
     
     try:
-        print(f"   🔧 Executing: {cmd}")
+        print(f"   🔧 ADB: {cmd}")
         result = subprocess.run([adb_path, '-s', adb_device, 'shell', cmd],
                               capture_output=True, text=True, timeout=15)
-        print(f"   ✅ ADB executed successfully")
+        print(f"   ✅ Executed")
         return True
     except Exception as e:
-        print(f"   ❌ ADB execution failed: {e}")
+        print(f"   ❌ Failed: {e}")
         return False
 
 def adb_long_hold_drag(direction_x, direction_y, duration_ms=None):
-    """Long hold drag - v4.5 dengan forced execution"""
+    """Long hold drag"""
     global adb_device, adb_path
     if not adb_device or not adb_path:
         return False
@@ -185,18 +225,14 @@ def adb_long_hold_drag(direction_x, direction_y, duration_ms=None):
         duration_ms = DRAG_DURATION_MS
     
     try:
-        # Normalize direction
         mag = np.sqrt(direction_x**2 + direction_y**2)
         if mag < DIRECTION_AXIS_DEADZONE:
             return False
         
         norm_x = direction_x / mag
         norm_y = direction_y / mag
-        
-        # Calculate push distance
         push_dist = min(mag * DRAG_PUSH_MULTIPLIER, JOYSTICK_PUSH_RADIUS)
         
-        # Calculate target position
         target_x = int(JOYSTICK_CENTER_X + (norm_x * push_dist))
         target_y = int(JOYSTICK_CENTER_Y + (norm_y * push_dist))
         
@@ -207,9 +243,8 @@ def adb_long_hold_drag(direction_x, direction_y, duration_ms=None):
             direction_str = "↑" if norm_y < 0 else "↓"
         
         print(f'🎮 {direction_str} DRAG: ({JOYSTICK_CENTER_X},{JOYSTICK_CENTER_Y}) → ({target_x},{target_y})')
-        print(f'   Hold: {duration_ms}ms ({duration_ms/1000.0:.1f}s) | Mag: {mag:.0f}')
+        print(f'   {duration_ms}ms hold | Magnitude: {mag:.0f}')
         
-        # Execute drag
         cmd = f"input touchscreen swipe {JOYSTICK_CENTER_X} {JOYSTICK_CENTER_Y} {target_x} {target_y} {duration_ms}"
         
         success = execute_adb_command(cmd)
@@ -225,20 +260,20 @@ def adb_long_hold_drag(direction_x, direction_y, duration_ms=None):
         return False
 
 def adb_tap(x, y):
-    """Tap at coordinates"""
+    """Tap"""
     global adb_device, adb_path
     if not adb_device or not adb_path:
         return False
     
     try:
         cmd = f"input touchscreen tap {x} {y}"
-        print(f"   🖱️  Tap at ({x}, {y})")
+        print(f"   🖱️  Tap ({x}, {y})")
         return execute_adb_command(cmd)
     except Exception as e:
         print(f"❌ Tap failed: {e}")
         return False
 
-# ============ TEMPLATE MATCHING FUNCTIONS ============
+# ============ TEMPLATE MATCHING ============
 
 def find_harvest_prompt(screenshot):
     """Find harvest prompt"""
@@ -267,7 +302,7 @@ def find_harvest_prompt(screenshot):
     return best
 
 def find_template_candidates(screenshot, template, threshold):
-    """Find all matches >= threshold"""
+    """Find matches"""
     try:
         search_img = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY) if screenshot.ndim == 3 else screenshot
         tpl = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY) if template.ndim == 3 else template
@@ -328,7 +363,7 @@ def screenshot_thread_worker(target_window):
 # ============ BOT MAIN LOOP ============
 
 def create_bot(window_title):
-    """Main bot loop - v4.5 dengan force drag fix"""
+    """Main bot loop"""
     global Lilian, lifted_cotton, movement_active, current_target, latest_screenshot
     
     try:
@@ -347,8 +382,7 @@ def create_bot(window_title):
         print(f"✅ Window: {target_window.title}")
         print(f"📏 Resolution: {game_w}x{game_h}")
         print(f"🎮 Joystick: ({JOYSTICK_CENTER_X}, {JOYSTICK_CENTER_Y})")
-        print(f"⏱️  Drag hold: {DRAG_DURATION_MS}ms ({DRAG_DURATION_MS/1000.0:.1f}s)")
-        print(f"📍 Distance threshold: {DISTANCE_THRESHOLD}px")
+        print(f"⏱️  Drag: {DRAG_DURATION_MS}ms")
         print("")
         
         # Start screenshot thread
@@ -357,7 +391,7 @@ def create_bot(window_title):
         time.sleep(1)
 
         while not target_window.isActive:
-            print("⏳ Waiting for window to be active...")
+            print("⏳ Waiting for window...")
             time.sleep(0.5)
 
         print("✅ Bot started!")
@@ -386,7 +420,7 @@ def create_bot(window_title):
             try:
                 now = time.monotonic()
                 
-                # STATE 1: Check if should harvest
+                # STATE 1: Harvesting
                 if harvesting:
                     if now - harvest_start >= HARVEST_COMPLETE_MIN_TIME:
                         print("✅ Harvest complete")
@@ -395,12 +429,11 @@ def create_bot(window_title):
                         reached_target = False
                     continue
                 
-                # STATE 2: If reached target, try to harvest
+                # STATE 2: Reached target, check harvest prompt
                 if reached_target and not movement_active:
                     prompt = find_harvest_prompt(ss)
                     if prompt:
-                        print(f"🌾 Gather prompt found! Confidence: {prompt[1]:.2f}")
-                        print(f"📍 Clicking gather button at ({GATHER_BUTTON_X}, {GATHER_BUTTON_Y})")
+                        print(f"🌾 Gather found! ({prompt[1]:.2f})")
                         harvesting = True
                         harvest_start = now
                         
@@ -409,14 +442,14 @@ def create_bot(window_title):
                             lifted_cotton += 1
                             if 'label_lifted_cotton' in globals():
                                 label_lifted_cotton.config(text=f'🌾 Cotton: {lifted_cotton}')
-                            print(f"✅ Gathering... wait {HARVEST_COMPLETE_MIN_TIME}s")
+                            print(f"✅ Gathering...")
                             time.sleep(HARVEST_COMPLETE_MIN_TIME)
                             harvesting = False
                             reached_target = False
                             locked_target = None
                         continue
                 
-                # STATE 3: FORCE DRAG TO TARGET (CRITICAL FIX v4.5)
+                # STATE 3: Force drag to target
                 if locked_target and not movement_active:
                     match = find_locked_target(ss, locked_target)
                     if match is None:
@@ -430,7 +463,7 @@ def create_bot(window_title):
                         dist = calculate_distance((char_x, char_y), target_center)
 
                         if dist <= DISTANCE_THRESHOLD:
-                            print(f"✅ REACHED TARGET! Dist={dist:.0f}px")
+                            print(f"✅ REACHED! ({dist:.0f}px)")
                             reached_target = True
                         elif now - last_direction_update >= DIRECTION_RECALC_INTERVAL:
                             last_direction_update = now
@@ -439,7 +472,7 @@ def create_bot(window_title):
                             
                             print(f"  📍 Distance: {dist:.0f}px")
                             
-                            # FORCE DRAG - JANGAN SKIP!
+                            # FORCE DRAG
                             movement_active = True
                             try:
                                 success = adb_long_hold_drag(dx, dy, DRAG_DURATION_MS)
@@ -449,7 +482,7 @@ def create_bot(window_title):
                                 movement_active = False
                         continue
                 
-                # STATE 4: Scan for cotton (if no target)
+                # STATE 4: Scan for cotton
                 if not locked_target and not movement_active:
                     if os.path.isdir(COTTON_FOLDER):
                         try:
@@ -485,8 +518,7 @@ def create_bot(window_title):
                                 'last_center': center,
                             }
                             reached_target = False
-                            print(f"🔒 Target LOCKED! Dist={dist:.0f}px, Conf={conf:.2f}")
-                            print(f"   → Will FORCE drag to target")
+                            print(f"🔒 Target LOCKED! ({dist:.0f}px, {conf:.2f})")
 
                 try:
                     display_image(ss)
@@ -545,9 +577,8 @@ def test_input():
         print("❌ ADB not connected!")
         return
     
-    print(f"✅ ADB: {adb_device}")
-    print(f"✅ Drag hold: {DRAG_DURATION_MS}ms")
-    print(f"⏳ Wait 3 seconds...\n")
+    print(f"✅ Device: {adb_device}")
+    print(f"⏳ Starting in 3s...\n")
     time.sleep(3)
     
     print("Testing 4 directions...")
@@ -568,7 +599,8 @@ def start_function():
         print("❌ ADB not connected!")
         return
     
-    print("▶️  STARTING BOT v4.5")
+    print("▶️  STARTING BOT v4.6")
+    print(f"   Device: {adb_device}")
     Lilian = True
     threading.Thread(target=create_bot, args=(WINDOW_TITLE,), daemon=True).start()
     start_button["state"] = "disabled"
@@ -577,7 +609,7 @@ def start_function():
 def stop_function():
     """Stop"""
     global Lilian
-    print("⏹️  STOPPING BOT")
+    print("⏹️  STOPPING")
     Lilian = False
     start_button["state"] = "normal"
     stop_button["state"] = "disabled"
@@ -588,15 +620,15 @@ if __name__ == "__main__":
     Lilian = False
     
     print("\n" + "="*60)
-    print("🎮 HEARTWOOD BOT v4.5")
+    print("🎮 HEARTWOOD BOT v4.6")
     print("="*60)
-    print("\n🔌 Auto-detecting ADB...\n")
+    print("\n🔌 Initializing...\n")
     
     if not init_adb():
         print("\n⚠️  ADB initialization failed!")
     
     root = tk.Tk()
-    root.title("🎮 Heartwood Bot v4.5 (AUTO ADB + FORCE DRAG)")
+    root.title("🎮 Heartwood Bot v4.6 (AUTO DEVICE DETECT)")
     root.geometry("305x700+0+0")
     root.attributes("-topmost", True)
     root.wm_attributes('-toolwindow', 1)
@@ -627,21 +659,21 @@ if __name__ == "__main__":
     label_lifted_cotton.grid(row=0, column=0, columnspan=2, padx=0, pady=5)
 
     print('╔════════════════════════════════════╗')
-    print('║  🎮 HEARTWOOD BOT v4.5            ║')
-    print('║  AUTO ADB + FORCE DRAG FIX         ║')
+    print('║  🎮 HEARTWOOD BOT v4.6            ║')
+    print('║  AUTO DEVICE DETECTION             ║')
+    print('║  emulator-5554 PRIORITY            ║')
     print('╚════════════════════════════════════╝')
     print('')
-    print('🆕 v4.5 FIXES:')
-    print('  ✅ Auto ADB path detection (Windows/Linux/Mac)')
-    print('  ✅ FORCE drag to target BEFORE gather')
-    print('  ✅ Proper state machine (Scan → Drag → Harvest)')
-    print('  ✅ No skipping drag phase')
+    print('🆕 v4.6 CRITICAL FIXES:')
+    print('  ✅ Auto detect correct ADB device')
+    print('  ✅ emulator-5554 priority (LDPlayer)')
+    print('  ✅ localhost:5555 fallback')
+    print('  ✅ Any device support')
     print('')
-    print('⚙️  Configuration:')
-    print(f'  • ADB Path: Auto-detected')
-    print(f'  • Joystick: ({JOYSTICK_CENTER_X}, {JOYSTICK_CENTER_Y})')
-    print(f'  • Gather: ({GATHER_BUTTON_X}, {GATHER_BUTTON_Y})')
-    print(f'  • Drag hold: {DRAG_DURATION_MS}ms')
+    print('Auto-Detection Priority:')
+    print('  1. emulator-5554 (LDPlayer)')
+    print('  2. localhost:5555')
+    print('  3. First available device')
     print('')
 
     stop_button["state"] = "disabled"
